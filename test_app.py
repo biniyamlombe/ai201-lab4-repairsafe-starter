@@ -34,7 +34,7 @@ class TestProvenanceGuard(unittest.TestCase):
         human_text = (
             "This is a sentence. "
             "But this is a much longer and more complex sentence containing multiple adjectives and verbs. "
-            "Wait! "
+            "Wait. "
             "Yes, variance should be high."
         )
         slv = detector.calculate_slv(human_text)
@@ -83,6 +83,8 @@ class TestProvenanceGuard(unittest.TestCase):
         self.assertIsNotNone(record)
         self.assertEqual(record["author_id"], "author_1")
         self.assertEqual(record["classification"], "human")
+        self.assertEqual(record["content_type"], "text")
+        self.assertEqual(record["provenance_certificate"], 0)
 
     @patch('detector.get_llm_score')
     def test_submit_endpoint_ai(self, mock_llm_score):
@@ -162,6 +164,91 @@ class TestProvenanceGuard(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         data = json.loads(response.data)
         self.assertEqual(len(data["logs"]), 2)
+
+    # ==========================================================================
+    # Stretch Feature Unit Tests
+    # ==========================================================================
+
+    @patch('detector.get_llm_score')
+    def test_provenance_certificate(self, mock_llm_score):
+        # Even if LLM returns 0.95 (AI), the verification token should bypass this
+        mock_llm_score.return_value = 0.95
+        
+        payload = {
+            "author_id": "verified_author_777",
+            "title": "Verified Masterpiece",
+            "content": "Furthermore, we delve into tapestries of testaments.",
+            "creator_verification_token": "token_verified_human_123"
+        }
+        
+        response = self.client.post('/submit', json=payload)
+        self.assertEqual(response.status_code, 201)
+        
+        data = json.loads(response.data)
+        self.assertEqual(data["classification"], "human")
+        self.assertEqual(data["provenance_certificate"], True)
+        self.assertEqual(data["label_text"], detector.LABEL_PROVENANCE_CERTIFICATE)
+        
+        # Verify stored DB values
+        record = database.get_submission(data["submission_id"], db_path=self.db_path)
+        self.assertEqual(record["provenance_certificate"], 1)
+        self.assertEqual(record["classification"], "human")
+
+    @patch('detector.get_llm_score')
+    def test_multimodal_metadata(self, mock_llm_score):
+        mock_llm_score.return_value = 0.85
+        
+        payload = {
+            "author_id": "photographer_12",
+            "title": "Sunset Alt Text",
+            "content": "A high resolution photo showing a beautiful sunset over the mountains in vivid color.",
+            "content_type": "metadata"
+        }
+        
+        response = self.client.post('/submit', json=payload)
+        self.assertEqual(response.status_code, 201)
+        
+        data = json.loads(response.data)
+        self.assertEqual(data["classification"], "ai") # LLM score 0.85 > 0.80
+        
+        # Verify content_type log in DB
+        record = database.get_submission(data["submission_id"], db_path=self.db_path)
+        self.assertEqual(record["content_type"], "metadata")
+
+    @patch('detector.get_llm_score')
+    def test_analytics_dashboard(self, mock_llm_score):
+        mock_llm_score.return_value = 0.1  # Flag as Human
+        
+        # Submission 1: Human
+        self.client.post('/submit', json={"author_id": "u1", "title": "t1", "content": "Sentence spacing here is quite human."})
+        
+        mock_llm_score.return_value = 0.9  # Flag as AI
+        # Submission 2: AI
+        res2 = self.client.post('/submit', json={"author_id": "u2", "title": "t2", "content": "Furthermore, we must delve into the tapestry."})
+        sub2_id = json.loads(res2.data)["submission_id"]
+        
+        # File appeal on submission 2
+        self.client.post('/appeal', json={"submission_id": sub2_id, "reason": "I wrote it."})
+        
+        # Submission 3: Human with Provenance Certificate
+        self.client.post('/submit', json={
+            "author_id": "u3",
+            "title": "t3",
+            "content": "Another human-written sample.",
+            "creator_verification_token": "token_verified_human_123"
+        })
+        
+        response = self.client.get('/analytics')
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.data)
+        
+        self.assertEqual(data["total_submissions"], 3)
+        self.assertEqual(data["active_appeals_count"], 1)
+        self.assertEqual(data["provenance_certificates_issued"], 1)
+        # 1 appeal / 3 submissions = 0.3333
+        self.assertAlmostEqual(data["appeal_rate"], 0.3333, places=3)
+        self.assertEqual(data["verdict_distribution"]["human"], round(2/3, 4))
+        self.assertEqual(data["verdict_distribution"]["ai"], round(1/3, 4))
 
 if __name__ == '__main__':
     unittest.main()

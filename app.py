@@ -13,9 +13,6 @@ import detector
 app = Flask(__name__)
 
 # Configure Flask-Limiter
-# Limits are based on typical usage for a writing platform:
-# - Creators write/publish text in sessions, so 10 submissions per minute / 100 per day is reasonable.
-# - Appeals are even rarer, limiting to 5 per minute / 50 per day prevents database write flooding.
 limiter = Limiter(
     key_func=get_remote_address,
     app=app,
@@ -55,6 +52,7 @@ def submit_content():
     """
     Accepts text content for analysis. Returns the attribution result,
     confidence score, and user-facing transparency label text.
+    Supports Provenance Certificates and Multi-Modal inputs.
     """
     data = request.get_json()
     if not data:
@@ -63,6 +61,8 @@ def submit_content():
     author_id = data.get("author_id")
     title = data.get("title")
     content = data.get("content")
+    content_type = data.get("content_type", "text")  # 'text' or 'metadata'
+    verification_token = data.get("creator_verification_token")
     
     if not author_id or not title or not content:
         return jsonify({
@@ -76,9 +76,15 @@ def submit_content():
             "message": "content cannot be empty"
         }), 400
         
+    if content_type not in ("text", "metadata"):
+        return jsonify({
+            "error": "Bad Request",
+            "message": "content_type must be either 'text' or 'metadata'"
+        }), 400
+        
     # Run multi-signal classification
     try:
-        analysis = detector.analyze_content(content)
+        analysis = detector.analyze_content(content, content_type=content_type)
     except Exception as e:
         return jsonify({
             "error": "Internal Server Error",
@@ -88,6 +94,16 @@ def submit_content():
     # Generate unique submission identifier
     submission_id = f"sub_{uuid.uuid4().hex[:8]}"
     
+    # Process Provenance Certificate verification
+    provenance_certificate = 0
+    classification = analysis["classification"]
+    label_text = analysis["label_text"]
+    
+    if verification_token == "token_verified_human_123":
+        provenance_certificate = 1
+        classification = "human"
+        label_text = detector.LABEL_PROVENANCE_CERTIFICATE
+        
     # Store verdict in SQLite database
     database.insert_submission(
         submission_id=submission_id,
@@ -99,8 +115,10 @@ def submit_content():
         punctuation_density=analysis["punctuation_density"],
         llm_score=analysis["llm_score"],
         combined_score=analysis["combined_score"],
-        classification=analysis["classification"],
-        label_text=analysis["label_text"]
+        classification=classification,
+        label_text=label_text,
+        content_type=content_type,
+        provenance_certificate=provenance_certificate
     )
     
     # Append structured audit record to JSONL log file
@@ -110,15 +128,18 @@ def submit_content():
         "submission_id": submission_id,
         "author_id": author_id,
         "title": title,
+        "content_type": content_type,
+        "provenance_certificate": provenance_certificate,
         "content_preview": content[:150] + "..." if len(content) > 150 else content,
         "slv": analysis["slv"],
         "ttr": analysis["ttr"],
         "punctuation_density": analysis["punctuation_density"],
-        "heuristic_score": analysis["heuristic_score"],
+        "slv_score": analysis["slv_score"],
+        "ttr_score": analysis["ttr_score"],
         "llm_score": analysis["llm_score"],
         "combined_score": analysis["combined_score"],
-        "classification": analysis["classification"],
-        "label_text": analysis["label_text"],
+        "classification": classification,
+        "label_text": label_text,
         "status": "active"
     }
     append_to_audit_jsonl(audit_entry)
@@ -126,9 +147,10 @@ def submit_content():
     # Return structured API response
     return jsonify({
         "submission_id": submission_id,
-        "classification": analysis["classification"],
+        "classification": classification,
         "confidence_score": round(analysis["combined_score"], 4),
-        "label_text": analysis["label_text"],
+        "label_text": label_text,
+        "provenance_certificate": bool(provenance_certificate),
         "status": "active"
     }), 201
 
@@ -196,6 +218,52 @@ def get_logs():
     """
     submissions = database.get_all_submissions()
     return jsonify({"logs": submissions}), 200
+
+@app.route("/api/v1/analytics", methods=["GET"])
+@app.route("/analytics", methods=["GET"])
+def get_analytics():
+    """
+    Computes and returns metrics including:
+    1. Verdict distribution (ratio of AI vs human vs uncertain)
+    2. Appeal rates
+    3. Volume of submissions & certificates
+    """
+    submissions = database.get_all_submissions()
+    total = len(submissions)
+    
+    if total == 0:
+        return jsonify({
+            "verdict_distribution": {"human": 0.0, "uncertain": 0.0, "ai": 0.0},
+            "appeal_rate": 0.0,
+            "total_submissions": 0,
+            "active_appeals_count": 0,
+            "provenance_certificates_issued": 0
+        }), 200
+        
+    human_count = sum(1 for s in submissions if s["classification"] == "human")
+    uncertain_count = sum(1 for s in submissions if s["classification"] == "uncertain")
+    ai_count = sum(1 for s in submissions if s["classification"] == "ai")
+    
+    appealed_count = sum(1 for s in submissions if s["appeal_reason"] is not None)
+    active_appeals = sum(1 for s in submissions if s["status"] == "under_review")
+    certs_issued = sum(1 for s in submissions if s["provenance_certificate"] == 1)
+    
+    distribution = {
+        "human": round(human_count / total, 4),
+        "uncertain": round(uncertain_count / total, 4),
+        "ai": round(ai_count / total, 4)
+    }
+    
+    # Appeal rate is calculated as: appealed count / total count
+    appeal_rate = round(appealed_count / total, 4)
+    
+    return jsonify({
+        "verdict_distribution": distribution,
+        "appeal_rate": appeal_rate,
+        "total_submissions": total,
+        "active_appeals_count": active_appeals,
+        "provenance_certificates_issued": certs_issued
+    }), 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5001, debug=True)

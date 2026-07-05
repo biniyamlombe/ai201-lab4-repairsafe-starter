@@ -10,6 +10,7 @@ load_dotenv()
 LABEL_HIGH_HUMAN = "This work is classified as human-authored. Our analysis suggests a high probability of original human creation."
 LABEL_HIGH_AI = "This work is flagged as AI-generated. Our analysis detected patterns highly consistent with artificial intelligence writing tools."
 LABEL_UNCERTAIN = "This work has mixed stylistic markers. Our analysis is unable to determine the origin with high confidence, so the author's original attribution is displayed."
+LABEL_PROVENANCE_CERTIFICATE = "Verified Human Creator Certificate: This content has been verified as original human writing by a certified author."
 
 def split_sentences(text):
     """
@@ -61,31 +62,26 @@ def calculate_punctuation_density(text):
     punc_count = sum(1 for char in text if char in punctuation_chars)
     return punc_count / len(text)
 
-def get_heuristic_score(slv, ttr, word_count):
+def get_slv_score(slv):
     """
-    Combines SLV and TTR into a heuristic score between 0.0 (Human) and 1.0 (AI).
-    If text is too short, return a neutral 0.5.
+    Normalizes Sentence Length Variance to a 0.0-1.0 AI probability score.
+    Variance > 25 is human (0.0 score); variance < 4 is AI (1.0 score).
     """
-    if word_count < 50:
-        return 0.5
-        
-    # SLV mapping: Variance > 25 is human (0.0 AI score); Variance < 4 is AI (1.0 AI score)
-    # Clamp SLV between 4 and 25
     clamped_slv = max(4.0, min(25.0, slv))
-    slv_score = 1.0 - ((clamped_slv - 4.0) / (25.0 - 4.0))
-    
-    # TTR mapping: TTR > 0.65 is human (0.0 AI score); TTR < 0.45 is AI (1.0 AI score)
-    # Clamp TTR between 0.45 and 0.65
-    clamped_ttr = max(0.45, min(0.65, ttr))
-    ttr_score = 1.0 - ((clamped_ttr - 0.45) / (0.65 - 0.45))
-    
-    # Weighted average of SLV and TTR
-    return 0.5 * slv_score + 0.5 * ttr_score
+    return 1.0 - ((clamped_slv - 4.0) / (25.0 - 4.0))
 
-def get_llm_score(text):
+def get_ttr_score(ttr):
+    """
+    Normalizes Type-Token Ratio to a 0.0-1.0 AI probability score.
+    TTR > 0.65 is human (0.0 score); TTR < 0.45 is AI (1.0 score).
+    """
+    clamped_ttr = max(0.45, min(0.65, ttr))
+    return 1.0 - ((clamped_ttr - 0.45) / (0.65 - 0.45))
+
+def get_llm_score(text, content_type='text'):
     """
     Calls Groq Llama-3.3-70b-versatile to evaluate text semantic patterns.
-    Returns a score between 0.0 and 1.0.
+    Uses custom prompt configurations based on content_type (Multi-Modal).
     """
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
@@ -93,7 +89,7 @@ def get_llm_score(text):
         
     client = Groq(api_key=api_key)
     
-    system_prompt = (
+    text_prompt = (
         "You are an expert forensic linguist specializing in distinguishing human-written text from AI-generated text.\n"
         "Analyze the submitted text for:\n"
         "1. Vocabulary choices (e.g., overuse of words like 'delve', 'tapestry', 'testament', 'furthermore').\n"
@@ -106,6 +102,22 @@ def get_llm_score(text):
         "}\n"
         "Do not write anything else. Return ONLY valid JSON."
     )
+    
+    metadata_prompt = (
+        "You are an expert forensic linguist specializing in distinguishing human-written image descriptions (alt text) from AI-generated descriptions.\n"
+        "Analyze the submitted description for:\n"
+        "1. AI clichés (e.g., starting with 'A beautiful photo of...', 'In this image, we see...', 'This image depicts...').\n"
+        "2. Overly descriptive, listing multiple elements rather than selecting the human-like focal points of the scene.\n"
+        "3. Flat, highly structured syntactic structures.\n\n"
+        "You must return a JSON object with this exact structure:\n"
+        "{\n"
+        "  \"ai_likelihood\": <float between 0.0 and 1.0 representing the probability that the text is AI-generated>,\n"
+        "  \"reasoning\": \"<brief 1-2 sentence explanation of your linguistic findings>\"\n"
+        "}\n"
+        "Do not write anything else. Return ONLY valid JSON."
+    )
+    
+    system_prompt = metadata_prompt if content_type == 'metadata' else text_prompt
     
     response = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
@@ -125,35 +137,42 @@ def get_llm_score(text):
         print(f"Error parsing LLM response: {e}. Raw content: {response.choices[0].message.content}")
         return 0.5  # Fallback to neutral if LLM fails
 
-def analyze_content(text):
+def analyze_content(text, content_type='text'):
     """
-    Orchestrates the multi-signal detection pipeline.
-    Returns a dictionary with scores, classification, and label.
+    Orchestrates the multi-signal detection pipeline (Ensemble Detection).
+    Signals:
+    1. SLV score (Sentence variance structure)
+    2. TTR score (Vocabulary diversity)
+    3. Groq LLM score (Forensics semantic engine)
     """
     words = get_words(text)
     word_count = len(words)
     
-    # Calculate Signal 1: Heuristics
+    # Calculate Signal 1 & 2: Local Metrics
     slv = calculate_slv(text)
     ttr = calculate_ttr(text)
     punc_density = calculate_punctuation_density(text)
-    heuristic_score = get_heuristic_score(slv, ttr, word_count)
     
-    # Calculate Signal 2: LLM
+    slv_score = get_slv_score(slv)
+    ttr_score = get_ttr_score(ttr)
+    
+    # Calculate Signal 3: LLM Forensics
     try:
-        llm_score = get_llm_score(text)
+        llm_score = get_llm_score(text, content_type=content_type)
     except Exception as e:
         print(f"LLM signal failed: {e}. Falling back to heuristic-only scoring.")
-        llm_score = heuristic_score
+        llm_score = 0.5 * slv_score + 0.5 * ttr_score
         
-    # Ensemble combination: weight LLM 70% and Heuristics 30%
-    # If text is too short (< 50 words), heuristics are unreliable, rely only on LLM
+    # Ensemble combination math
+    # Short text bypass: if word count < 50, metrics are too volatile, use LLM only
     if word_count < 50:
         combined_score = llm_score
     else:
-        combined_score = 0.3 * heuristic_score + 0.7 * llm_score
+        # Long text weighted voting strategy
+        # 15% SLV + 15% TTR + 70% LLM
+        combined_score = 0.15 * slv_score + 0.15 * ttr_score + 0.70 * llm_score
         
-    # Categorization based on asymmetric false positive prevention thresholds
+    # Categorization based on asymmetric thresholds
     if combined_score > 0.80:
         classification = "ai"
         label_text = LABEL_HIGH_AI
@@ -168,7 +187,8 @@ def analyze_content(text):
         "slv": slv,
         "ttr": ttr,
         "punctuation_density": punc_density,
-        "heuristic_score": heuristic_score,
+        "slv_score": slv_score,
+        "ttr_score": ttr_score,
         "llm_score": llm_score,
         "combined_score": combined_score,
         "classification": classification,

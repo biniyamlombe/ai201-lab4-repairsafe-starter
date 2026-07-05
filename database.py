@@ -21,13 +21,15 @@ def init_db(db_path=None):
     conn = get_db_connection(db_path)
     cursor = conn.cursor()
     
-    # Create the submissions table
+    # Create the submissions table (extended with content_type and provenance_certificate)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS submissions (
             submission_id TEXT PRIMARY KEY,
             author_id TEXT NOT NULL,
             title TEXT NOT NULL,
             content TEXT NOT NULL,
+            content_type TEXT NOT NULL DEFAULT 'text',
+            provenance_certificate INTEGER NOT NULL DEFAULT 0,
             slv REAL NOT NULL,
             ttr REAL NOT NULL,
             punctuation_density REAL NOT NULL,
@@ -47,6 +49,7 @@ def insert_submission(
     submission_id, author_id, title, content, 
     slv, ttr, punctuation_density, llm_score, 
     combined_score, classification, label_text,
+    content_type='text', provenance_certificate=0,
     db_path=None
 ):
     """
@@ -59,12 +62,14 @@ def insert_submission(
     cursor.execute("""
         INSERT INTO submissions (
             submission_id, author_id, title, content,
+            content_type, provenance_certificate,
             slv, ttr, punctuation_density, llm_score,
             combined_score, classification, label_text,
             status, appeal_reason, timestamp
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         submission_id, author_id, title, content,
+        content_type, provenance_certificate,
         slv, ttr, punctuation_density, llm_score,
         combined_score, classification, label_text,
         "active", None, timestamp
