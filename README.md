@@ -22,15 +22,14 @@ Provenance Guard uses a hybrid, multi-signal pipeline to make content classifica
                                 +-----------------------+
                                 |  Detection Pipeline   |
                                 +-----------------------+
-                               /                         \
-                              v                           v
-                +--------------------------+  +--------------------------+
-                |  Signal 1: Heuristics    |  |       Signal 2: LLM      |
-                | - Sentence Var (SLV)     |  | - Forensic Linguistics   |
-                | - Vocab Diversity (TTR)  |  | - predictability & flow  |
-                +--------------------------+  +--------------------------+
-                              \                           /
-                               v                         v
+                               /           |             \
+                              v            v              v
+                +-----------------+  +-----------------+  +-----------------+
+                | Signal 1: SLV   |  | Signal 2: TTR   |  | Signal 3: LLM   |
+                | - sentence pace |  | - vocab choice  |  | - predictability|
+                +-----------------+  +-----------------+  +-----------------+
+                              \            |             /
+                               v           v            v
                                 +-----------------------+
                                 |  Ensemble Aggregation |
                                 |  (Weighted / Bias)    |
@@ -50,12 +49,13 @@ Provenance Guard uses a hybrid, multi-signal pipeline to make content classifica
                                               +--------------------+
 ```
 
-### 1. Signal 1: Stylometric Heuristics (Structural Analysis)
+### 1. Signal 1: Stylometric Heuristics (Sentence Pacing Structure)
 * **Sentence Length Variance (SLV):** Measures the standard deviation of sentence word counts. Humans mix very short sentences with long, complex structures, producing a high variance. AI text generates statistically homogeneous word counts, leading to low variance.
-* **Type-Token Ratio (TTR):** Measures vocabulary diversity (ratio of unique words to total words). Humans employ creative word choices and colloquialisms, leading to a high TTR. AI text maintains high-probability tokens and repetitive connector words, producing a lower TTR.
-* **Punctuation Density:** Measures punctuation frequency. AI text uses highly conventional, evenly spaced punctuation, while human text exhibits irregular, stylistic variations.
 
-### 2. Signal 2: Forensic Linguistic Analysis (LLM Analysis)
+### 2. Signal 2: Stylometric Heuristics (Vocabulary Diversity)
+* **Type-Token Ratio (TTR):** Measures vocabulary diversity (ratio of unique words to total words). Humans employ creative word choices and colloquialisms, leading to a high TTR. AI text maintains high-probability tokens and repetitive connector words, producing a lower TTR.
+
+### 3. Signal 3: Forensic Linguistic Analysis (LLM Analysis)
 * Querying `llama-3.3-70b-versatile` (via Groq) to evaluate clichéd AI jargon (*delve, tapestry, testament, furthermore, critical, crucial*), standard five-paragraph rhetorical outlines, lack of personal narrative quirks, and overall readability.
 
 ---
@@ -69,6 +69,7 @@ We map classification confidence scores into plain-language, non-accusatory mess
 | **High-Confidence Human** | $0.00$ to $0.40$ | `"This work is classified as human-authored. Our analysis suggests a high probability of original human creation."` |
 | **Uncertain** | $0.40$ to $0.80$ | `"This work has mixed stylistic markers. Our analysis is unable to determine the origin with high confidence, so the author's original attribution is displayed."` |
 | **High-Confidence AI** | $0.80$ to $1.00$ | `"This work is flagged as AI-generated. Our analysis detected patterns highly consistent with artificial intelligence writing tools."` |
+| **Provenance Certificate** | Verified Human | `"Verified Human Creator Certificate: This content has been verified as original human writing by a certified author."` |
 
 ---
 
@@ -77,7 +78,7 @@ We map classification confidence scores into plain-language, non-accusatory mess
 To prevent incorrect classifications of human content (false positives), we implement an **asymmetric calibration strategy**:
 1. **Short Text Override:** If a text is shorter than 50 words, heuristics are mathematically unstable. The system overrides Heuristics and relies 100% on the LLM evaluation score.
 2. **Long Text Weighted Ensemble:** For text $\ge 50$ words, the combined score is:
-   $$\text{Combined Score} = 0.3 \times \text{Heuristics Score} + 0.7 \times \text{LLM Score}$$
+   $$\text{Combined Score} = 0.15 \times \text{SLV Score} + 0.15 \times \text{TTR Score} + 0.70 \times \text{LLM Score}$$
 3. **Threshold Guardrails:** Standard classifiers split at $0.5$. Provenance Guard uses an asymmetric layout where anything between $0.40$ and $0.80$ defaults to `Uncertain`, ensuring human text with slightly structured syntax is not falsely accused of being AI.
 
 ### Confidence Scoring Examples
@@ -88,11 +89,10 @@ We validated that the pipeline scores produce meaningful variation rather than b
 * **Text:** `"ok so i finally tried that new ramen place downtown and honestly? underwhelming. the broth was fine but they put WAY too much sodium in it and i was thirsty for like three hours after. my friend got the spicy version and said it was better. probably won't go back unless someone drags me there"`
 * **Pipeline Analysis:**
   * **Word count:** 51 (Heuristics enabled)
-  * **Sentence Length Variance (SLV):** 56.50 (High human variance)
-  * **Type-Token Ratio (TTR):** 0.87 (Rich vocabulary density)
-  * **Heuristic Score:** 0.00
+  * **SLV Score:** 0.00
+  * **TTR Score:** 0.00
   * **LLM Score:** 0.20
-  * **Combined Score:** $0.3 \times 0.00 + 0.7 \times 0.20 = \mathbf{0.14}$
+  * **Combined Score:** $0.15 \times 0.00 + 0.15 \times 0.00 + 0.70 \times 0.20 = \mathbf{0.14}$
   * **Verdict:** Human classification, displaying the human transparency label.
 
 #### Example B: High-Confidence AI (Score: 0.935 in tests)
@@ -133,6 +133,33 @@ Here are three sample entries showing the JSON payload structure:
 {"timestamp": "2026-07-05T18:14:04.385012", "event": "submission", "submission_id": "sub_19c15084", "author_id": "author_mary", "title": "AI generated piece", "content_preview": "Delve into the tapestry of crucial multifaceted aspects.", "slv": 5.0, "ttr": 0.48, "punctuation_density": 0.02, "heuristic_score": 0.9, "llm_score": 0.95, "combined_score": 0.935, "classification": "ai", "label_text": "This work is flagged as AI-generated. Our analysis detected patterns highly consistent with artificial intelligence writing tools.", "status": "active"}
 {"timestamp": "2026-07-05T18:14:04.559618", "event": "appeal", "submission_id": "sub_f42be70c", "author_id": "author_mary", "reason": "This was hand-written in my diary.", "previous_classification": "human"}
 ```
+
+---
+
+## Stretch Features Built
+
+We implemented and verified all four advanced stretch features for Provenance Guard:
+
+### 1. Ensemble Detection (3+ Signals)
+* **What we did:** Decomposed stylometrics into 2 independent structural scores (Sentence Length Variance and Type-Token Ratio) rather than averaging them into a single heuristic. These are combined with the third signal (Forensics LLM Score) using weight distributions: `0.15 * SLV_score + 0.15 * TTR_score + 0.70 * LLM_score`.
+* **Conflict Resolution:** Individual signal metrics and normalized scores are saved alongside the combined score in SQLite database records and JSONL log trails.
+
+### 2. Provenance Certificate
+* **Verification Design:** Creators present a valid token payload (`"creator_verification_token": "token_verified_human_123"`) representing prior verification (e.g. captcha/typing dynamics or linked GitHub profiles).
+* **Display Format:** If verified, the system sets `provenance_certificate: 1`, overrides standard flags, and displays a distinguishable transparency label: `"Verified Human Creator Certificate: This content has been verified as original human writing by a certified author."`
+
+### 3. Analytics Dashboard
+* **Route:** `GET /analytics`
+* **Metrics Returned:**
+  * `verdict_distribution`: Percentage of human vs. AI vs. uncertain submissions.
+  * `appeal_rate`: Ratio of appeals compared to total database entries.
+  * `total_submissions`: Submissions volume.
+  * `active_appeals_count`: Submissions currently pending moderator audit (`under_review`).
+  * `provenance_certificates_issued`: Volume of certificates issued.
+
+### 4. Multi-Modal alt-text / Image Descriptions Support
+* **Multi-Modal Integration:** Set `"content_type": "metadata"` to run submissions through a specialized forensic validation prompt geared towards image alt-text and asset metadata.
+* **Specialized Validation Prompt:** Instructs Llama-3.3 to flag alt-text clichés (*This photo displays...*, *An image of...*, or detailed, sterile object cataloging typical of AI vision generators).
 
 ---
 
