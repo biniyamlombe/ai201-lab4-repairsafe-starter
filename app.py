@@ -45,6 +45,64 @@ def append_to_audit_jsonl(entry):
     with open(LOG_FILE_PATH, "a") as f:
         f.write(json.dumps(entry) + "\n")
 
+@app.route("/", methods=["GET"])
+def index():
+    """
+    Renders a friendly API landing page showing available routes.
+    """
+    return """
+    <html>
+        <head>
+            <title>Provenance Guard API</title>
+            <style>
+                body { 
+                    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; 
+                    margin: 40px auto; 
+                    line-height: 1.6; 
+                    max-width: 800px; 
+                    color: #333; 
+                    background-color: #fafafa;
+                }
+                .container {
+                    background: #ffffff;
+                    padding: 40px;
+                    border-radius: 8px;
+                    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+                    border: 1px solid #eaeaea;
+                }
+                h1 { color: #111; margin-top: 0; }
+                li { margin-bottom: 12px; }
+                code { background: #f4f4f4; padding: 3px 6px; border-radius: 4px; font-family: monospace; font-size: 0.9em; }
+                a { color: #0066cc; text-decoration: none; font-weight: 500; }
+                a:hover { text-decoration: underline; }
+                .method {
+                    display: inline-block;
+                    padding: 2px 6px;
+                    border-radius: 4px;
+                    font-size: 0.8em;
+                    font-weight: bold;
+                    margin-right: 8px;
+                    color: white;
+                }
+                .get { background-color: #28a745; }
+                .post { background-color: #007bff; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>Provenance Guard API Backend</h1>
+                <p>Welcome! Provenance Guard is running. Below are the available API routes you can test:</p>
+                <ul>
+                    <li><span class="method get">GET</span><strong><a href="/log">/log</a></strong> - Retrieve structured audit log entries</li>
+                    <li><span class="method get">GET</span><strong><a href="/analytics">/analytics</a></strong> - Retrieve system analytics dashboard</li>
+                    <li><span class="method post">POST</span><code>/submit</code> - Submit content for classification (requires JSON payload)</li>
+                    <li><span class="method post">POST</span><code>/appeal</code> - File an appeal against a classification (requires JSON payload)</li>
+                </ul>
+            </div>
+        </body>
+    </html>
+    """
+
 @app.route("/api/v1/submit", methods=["POST"])
 @app.route("/submit", methods=["POST"])
 @limiter.limit("10 per minute; 100 per day")
