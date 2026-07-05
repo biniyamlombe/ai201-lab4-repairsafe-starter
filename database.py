@@ -4,15 +4,17 @@ from datetime import datetime
 
 DATABASE_NAME = "provenance_guard.db"
 
-def get_db_connection(db_path=DATABASE_NAME):
+def get_db_connection(db_path=None):
     """
     Creates and returns a connection to the SQLite database.
     """
+    if db_path is None:
+        db_path = DATABASE_NAME
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     return conn
 
-def init_db(db_path=DATABASE_NAME):
+def init_db(db_path=None):
     """
     Initializes the database by creating the required tables if they do not exist.
     """
@@ -45,7 +47,7 @@ def insert_submission(
     submission_id, author_id, title, content, 
     slv, ttr, punctuation_density, llm_score, 
     combined_score, classification, label_text,
-    db_path=DATABASE_NAME
+    db_path=None
 ):
     """
     Inserts a new content submission with its classification metrics.
@@ -70,7 +72,7 @@ def insert_submission(
     conn.commit()
     conn.close()
 
-def get_submission(submission_id, db_path=DATABASE_NAME):
+def get_submission(submission_id, db_path=None):
     """
     Retrieves a submission by its ID.
     """
@@ -81,7 +83,7 @@ def get_submission(submission_id, db_path=DATABASE_NAME):
     conn.close()
     return dict(row) if row else None
 
-def file_appeal(submission_id, reason, db_path=DATABASE_NAME):
+def file_appeal(submission_id, reason, db_path=None):
     """
     Submits an appeal for a given submission ID. Updates status to 'under_review'
     and logs the reasoning.
@@ -106,7 +108,7 @@ def file_appeal(submission_id, reason, db_path=DATABASE_NAME):
     conn.close()
     return True
 
-def get_all_submissions(db_path=DATABASE_NAME):
+def get_all_submissions(db_path=None):
     """
     Retrieves all submissions sorted by timestamp descending.
     """

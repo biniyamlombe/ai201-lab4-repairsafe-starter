@@ -1,215 +1,201 @@
-import gradio as gr
-from safety import classify_safety_tier
-from responder import generate_safe_response
-from auditor import log_interaction
+import os
+import uuid
+import json
+from datetime import datetime
+from flask import Flask, request, jsonify
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
-# ---------------------------------------------------------------------------
-# Example questions — 2 safe, 2 caution, 2 clearly refuse, 2 at the boundary
-# The "replace outlet" vs "add outlet" pair is the key contrast for Milestone 1
-# ---------------------------------------------------------------------------
+import database
+import detector
 
-EXAMPLES = [
-    "How do I patch a small hole in drywall?",
-    "How do I unclog a slow bathroom drain?",
-    "How do I replace a bathroom faucet?",
-    "How do I reset a GFCI outlet that won't reset?",
-    "Can I replace an electrical outlet that stopped working?",
-    "Can I add a new electrical outlet to my garage?",
-    "Can I upgrade my electrical panel to 200 amps myself?",
-    "How do I fix a gas line that smells like it's leaking?",
-]
+# Initialize Flask app
+app = Flask(__name__)
 
-# ---------------------------------------------------------------------------
-# Tier display config
-# ---------------------------------------------------------------------------
-
-TIER_CONFIG = {
-    "safe": {
-        "color": "#16a34a",
-        "icon": "✅",
-        "label": "SAFE TO DIY",
-        "note": "This is a routine repair most homeowners can handle.",
-    },
-    "caution": {
-        "color": "#d97706",
-        "icon": "⚠️",
-        "label": "PROCEED WITH CAUTION",
-        "note": "This repair is doable, but mistakes have real cost. Read carefully.",
-    },
-    "refuse": {
-        "color": "#dc2626",
-        "icon": "🚫",
-        "label": "PROFESSIONAL REQUIRED",
-        "note": "This repair requires a licensed professional. Do not attempt DIY.",
-    },
-    "unknown": {
-        "color": "#64748b",
-        "icon": "⚙️",
-        "label": "NOT YET CLASSIFIED",
-        "note": "Complete Milestone 1 to enable safety classification.",
-    },
-}
-
-
-def _tier_html(tier: str, reason: str) -> str:
-    cfg = TIER_CONFIG.get(tier, TIER_CONFIG["unknown"])
-    color = cfg["color"]
-    icon = cfg["icon"]
-    label = cfg["label"]
-    note = cfg["note"]
-    reason_block = (
-        f'<p style="margin:8px 0 0 0;color:#374151;font-size:0.9em;">'
-        f'<strong>Why:</strong> {reason}</p>'
-        if reason and tier in ("safe", "caution", "refuse")
-        else ""
-    )
-    return (
-        f'<div style="font-family:sans-serif;padding:14px 18px;'
-        f'border-left:5px solid {color};background:#f9fafb;'
-        f'border-radius:0 8px 8px 0;margin-bottom:4px;">'
-        f'  <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;">'
-        f'    <span style="font-size:1.25em;">{icon}</span>'
-        f'    <span style="background:{color};color:white;padding:3px 14px;'
-        f'border-radius:12px;font-weight:700;font-size:0.9em;letter-spacing:0.06em;">'
-        f'{label}</span>'
-        f'  </div>'
-        f'  <p style="margin:4px 0 0 0;color:#6b7280;font-size:0.85em;">{note}</p>'
-        f'  {reason_block}'
-        f'</div>'
-    )
-
-
-# ---------------------------------------------------------------------------
-# Core pipeline
-# ---------------------------------------------------------------------------
-
-def handle_question(question: str):
-    if not question.strip():
-        return (
-            "<p style='color:#9ca3af;font-style:italic;'>Ask a repair question to see the safety tier.</p>",
-            "",
-        )
-
-    # Milestone 1: classify
-    tier_result = classify_safety_tier(question)
-    tier = tier_result.get("tier", "unknown")
-    reason = tier_result.get("reason", "")
-
-    # Milestone 2: generate response
-    response = generate_safe_response(question, tier)
-
-    # Milestone 3: log
-    log_interaction(question, tier, response)
-
-    return _tier_html(tier, reason), response
-
-
-# ---------------------------------------------------------------------------
-# Tier guide content (loaded once at startup)
-# ---------------------------------------------------------------------------
-
-def _load_tier_guide() -> str:
-    try:
-        with open("data/repair_tiers.md", "r", encoding="utf-8") as f:
-            return f.read()
-    except FileNotFoundError:
-        return "_Tier guide not found. Make sure `data/repair_tiers.md` exists._"
-
-
-TIER_GUIDE_CONTENT = _load_tier_guide()
-
-
-# ---------------------------------------------------------------------------
-# Gradio UI
-# ---------------------------------------------------------------------------
-
-THEME = gr.themes.Soft(
-    primary_hue="orange",
-    secondary_hue="red",
-    neutral_hue="slate",
-    font=[gr.themes.GoogleFont("Inter"), "sans-serif"],
+# Configure Flask-Limiter
+# Limits are based on typical usage for a writing platform:
+# - Creators write/publish text in sessions, so 10 submissions per minute / 100 per day is reasonable.
+# - Appeals are even rarer, limiting to 5 per minute / 50 per day prevents database write flooding.
+limiter = Limiter(
+    key_func=get_remote_address,
+    app=app,
+    default_limits=["200 per day", "50 per hour"],
+    storage_uri="memory://"
 )
 
-CSS = """
-#ask-btn { background: #ea580c; color: white; font-weight: 600; }
-#ask-btn:hover { background: #c2410c; }
-"""
+# Ensure folders exist
+os.makedirs("logs", exist_ok=True)
+LOG_FILE_PATH = "logs/audit.jsonl"
 
-with gr.Blocks(title="RepairSafe") as demo:
+# Initialize database
+database.init_db()
 
-    gr.Markdown(
-        """
-# 🔧 RepairSafe
-**AI201 Lab 4 — Home Repair Safety Assistant**
+@app.errorhandler(429)
+def rate_limit_handler(e):
+    """
+    Custom error handler for rate limit violations. Returns a structured JSON response.
+    """
+    return jsonify({
+        "error": "Too Many Requests",
+        "message": "You have exceeded your rate limit. Please try again later.",
+        "limit": str(e.description)
+    }), 429
 
-Ask any home repair question. RepairSafe classifies the risk before answering —
-not every repair should come with a confident "here's how."
+def append_to_audit_jsonl(entry):
+    """
+    Helper to append structured records to the audit.jsonl log file.
+    """
+    with open(LOG_FILE_PATH, "a") as f:
+        f.write(json.dumps(entry) + "\n")
 
-Before the safety layer works, complete the milestones:
-- **Milestone 1:** Implement `classify_safety_tier()` in `safety.py`
-- **Milestone 2:** Implement `generate_safe_response()` in `responder.py`
-- **Milestone 3:** Implement `log_interaction()` in `auditor.py`
-        """
+@app.route("/api/v1/submit", methods=["POST"])
+@app.route("/submit", methods=["POST"])
+@limiter.limit("10 per minute; 100 per day")
+def submit_content():
+    """
+    Accepts text content for analysis. Returns the attribution result,
+    confidence score, and user-facing transparency label text.
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "Bad Request", "message": "JSON body is required"}), 400
+        
+    author_id = data.get("author_id")
+    title = data.get("title")
+    content = data.get("content")
+    
+    if not author_id or not title or not content:
+        return jsonify({
+            "error": "Bad Request",
+            "message": "author_id, title, and content fields are required"
+        }), 400
+        
+    if not content.strip():
+        return jsonify({
+            "error": "Bad Request",
+            "message": "content cannot be empty"
+        }), 400
+        
+    # Run multi-signal classification
+    try:
+        analysis = detector.analyze_content(content)
+    except Exception as e:
+        return jsonify({
+            "error": "Internal Server Error",
+            "message": f"Detection pipeline failed: {str(e)}"
+        }), 500
+        
+    # Generate unique submission identifier
+    submission_id = f"sub_{uuid.uuid4().hex[:8]}"
+    
+    # Store verdict in SQLite database
+    database.insert_submission(
+        submission_id=submission_id,
+        author_id=author_id,
+        title=title,
+        content=content,
+        slv=analysis["slv"],
+        ttr=analysis["ttr"],
+        punctuation_density=analysis["punctuation_density"],
+        llm_score=analysis["llm_score"],
+        combined_score=analysis["combined_score"],
+        classification=analysis["classification"],
+        label_text=analysis["label_text"]
     )
+    
+    # Append structured audit record to JSONL log file
+    audit_entry = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "event": "submission",
+        "submission_id": submission_id,
+        "author_id": author_id,
+        "title": title,
+        "content_preview": content[:150] + "..." if len(content) > 150 else content,
+        "slv": analysis["slv"],
+        "ttr": analysis["ttr"],
+        "punctuation_density": analysis["punctuation_density"],
+        "heuristic_score": analysis["heuristic_score"],
+        "llm_score": analysis["llm_score"],
+        "combined_score": analysis["combined_score"],
+        "classification": analysis["classification"],
+        "label_text": analysis["label_text"],
+        "status": "active"
+    }
+    append_to_audit_jsonl(audit_entry)
+    
+    # Return structured API response
+    return jsonify({
+        "submission_id": submission_id,
+        "classification": analysis["classification"],
+        "confidence_score": round(analysis["combined_score"], 4),
+        "label_text": analysis["label_text"],
+        "status": "active"
+    }), 201
 
-    with gr.Tabs():
+@app.route("/api/v1/appeal", methods=["POST"])
+@app.route("/appeal", methods=["POST"])
+@limiter.limit("5 per minute; 50 per day")
+def submit_appeal():
+    """
+    Allows a creator to contest an AI verdict.
+    Updates submission status to 'under_review'.
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "Bad Request", "message": "JSON body is required"}), 400
+        
+    submission_id = data.get("submission_id")
+    reason = data.get("reason")
+    
+    if not submission_id or not reason:
+        return jsonify({
+            "error": "Bad Request",
+            "message": "submission_id and reason fields are required"
+        }), 400
+        
+    if not reason.strip():
+        return jsonify({
+            "error": "Bad Request",
+            "message": "reason cannot be empty"
+        }), 400
+        
+    # Get current state from database to verify existence
+    submission = database.get_submission(submission_id)
+    if not submission:
+        return jsonify({"error": "Not Found", "message": f"Submission {submission_id} does not exist"}), 404
+        
+    # Update status to under review
+    success = database.file_appeal(submission_id, reason)
+    if not success:
+         return jsonify({"error": "Internal Error", "message": "Failed to update submission status"}), 500
+         
+    # Log the appeal event in JSONL
+    appeal_entry = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "event": "appeal",
+        "submission_id": submission_id,
+        "author_id": submission["author_id"],
+        "reason": reason,
+        "previous_classification": submission["classification"]
+    }
+    append_to_audit_jsonl(appeal_entry)
+    
+    return jsonify({
+        "submission_id": submission_id,
+        "status": "under_review",
+        "message": "Appeal successfully logged. Content is now under review."
+    }), 200
 
-        with gr.Tab("Ask a Question"):
-            with gr.Row():
-
-                with gr.Column(scale=2):
-                    question_box = gr.Textbox(
-                        label="Your repair question",
-                        placeholder="e.g. How do I replace a bathroom faucet?",
-                        lines=3,
-                    )
-                    ask_btn = gr.Button("Ask RepairSafe →", elem_id="ask-btn")
-
-                    gr.Markdown("---")
-                    gr.Markdown("#### Try an example")
-                    with gr.Row():
-                        for ex in EXAMPLES:
-                            short = ex[:40] + "…" if len(ex) > 40 else ex
-                            btn = gr.Button(short, size="sm")
-                            btn.click(fn=lambda e=ex: e, outputs=question_box)
-
-                with gr.Column(scale=2):
-                    gr.Markdown("#### Safety Classification")
-                    tier_display = gr.HTML(
-                        value="<p style='color:#9ca3af;font-style:italic;'>Result will appear here.</p>"
-                    )
-                    gr.Markdown("#### Response")
-                    response_box = gr.Textbox(
-                        label="",
-                        lines=10,
-                        interactive=False,
-                        show_label=False,
-                        placeholder="Response will appear here after Milestone 2 is complete.",
-                    )
-
-            ask_btn.click(
-                fn=handle_question,
-                inputs=question_box,
-                outputs=[tier_display, response_box],
-            )
-            question_box.submit(
-                fn=handle_question,
-                inputs=question_box,
-                outputs=[tier_display, response_box],
-            )
-
-        with gr.Tab("Tier Guide"):
-            gr.Markdown(
-                """
-Use this reference while building your classifier. The taxonomy here defines
-what each tier means, gives concrete examples for each, and walks through the
-edge cases where the **caution/refuse boundary** is most easily confused.
-
-Your `classify_safety_tier()` prompt in `safety.py` needs to capture these
-distinctions — especially the "replacing existing" vs. "adding new" contrast.
-                """
-            )
-            gr.Markdown(TIER_GUIDE_CONTENT)
+@app.route("/api/v1/logs", methods=["GET"])
+@app.route("/api/v1/log", methods=["GET"])
+@app.route("/logs", methods=["GET"])
+@app.route("/log", methods=["GET"])
+def get_logs():
+    """
+    Returns all logged decisions from the SQLite database.
+    """
+    submissions = database.get_all_submissions()
+    return jsonify({"logs": submissions}), 200
 
 if __name__ == "__main__":
-    demo.launch(theme=THEME, css=CSS)
+    app.run(host="0.0.0.0", port=5001, debug=True)
