@@ -6,7 +6,7 @@ Provenance Guard is a production-ready, backend content classification API desig
 
 ## Architecture and Multi-Signal Detection
 
-Provenance Guard uses a hybrid, multi-signal pipeline to make content classifications robust against bypasses and statistical noise. 
+Provenance Guard uses a hybrid, multi-signal pipeline to make content classifications robust against bypasses and statistical noise.
 
 ```
                                   +-------------------+
@@ -80,6 +80,29 @@ To prevent incorrect classifications of human content (false positives), we impl
    $$\text{Combined Score} = 0.3 \times \text{Heuristics Score} + 0.7 \times \text{LLM Score}$$
 3. **Threshold Guardrails:** Standard classifiers split at $0.5$. Provenance Guard uses an asymmetric layout where anything between $0.40$ and $0.80$ defaults to `Uncertain`, ensuring human text with slightly structured syntax is not falsely accused of being AI.
 
+### Confidence Scoring Examples
+
+We validated that the pipeline scores produce meaningful variation rather than binary flips:
+
+#### Example A: High-Confidence Human (Score: 0.14)
+* **Text:** `"ok so i finally tried that new ramen place downtown and honestly? underwhelming. the broth was fine but they put WAY too much sodium in it and i was thirsty for like three hours after. my friend got the spicy version and said it was better. probably won't go back unless someone drags me there"`
+* **Pipeline Analysis:**
+  * **Word count:** 51 (Heuristics enabled)
+  * **Sentence Length Variance (SLV):** 56.50 (High human variance)
+  * **Type-Token Ratio (TTR):** 0.87 (Rich vocabulary density)
+  * **Heuristic Score:** 0.00
+  * **LLM Score:** 0.20
+  * **Combined Score:** $0.3 \times 0.00 + 0.7 \times 0.20 = \mathbf{0.14}$
+  * **Verdict:** Human classification, displaying the human transparency label.
+
+#### Example B: High-Confidence AI (Score: 0.935 in tests)
+* **Text:** `"Furthermore, it is important to delve into the multifaceted tapestry of human evolution. Consequently, navigating this paradigm serves as a crucial testament to progress. Additionally, the integration of structured methodologies underscores our holistic trajectory."`
+* **Pipeline Analysis:**
+  * **Word count:** 35 (Short text override triggered; Heuristics ignored)
+  * **LLM Score:** 0.935 (Flagged stylistic clichés like *delve, tapestry, testament*)
+  * **Combined Score:** $\mathbf{0.935}$
+  * **Verdict:** AI classification, displaying the AI transparency label.
+
 ---
 
 ## Production Safety Infrastructure
@@ -110,6 +133,31 @@ Here are three sample entries showing the JSON payload structure:
 {"timestamp": "2026-07-05T18:14:04.385012", "event": "submission", "submission_id": "sub_19c15084", "author_id": "author_mary", "title": "AI generated piece", "content_preview": "Delve into the tapestry of crucial multifaceted aspects.", "slv": 5.0, "ttr": 0.48, "punctuation_density": 0.02, "heuristic_score": 0.9, "llm_score": 0.95, "combined_score": 0.935, "classification": "ai", "label_text": "This work is flagged as AI-generated. Our analysis detected patterns highly consistent with artificial intelligence writing tools.", "status": "active"}
 {"timestamp": "2026-07-05T18:14:04.559618", "event": "appeal", "submission_id": "sub_f42be70c", "author_id": "author_mary", "reason": "This was hand-written in my diary.", "previous_classification": "human"}
 ```
+
+---
+
+## Known Limitations
+
+Our multi-signal pipeline has specific statistical limitations:
+1. **Highly Repetitive Poetry (e.g., Villanelles or Ballads):** 
+   * Villanelles require repeating entire lines across multiple stanzas. This repetition artificially inflates TTR (vocabulary diversity drops) and creates uniform sentence pacing. The heuristics signal will erroneously flag this human-written poem as AI.
+2. **Technical Step-by-Step Documentation:**
+   * Documentation containing repetitive instructions (e.g., *"1. Compile the program. 2. Verify output. 3. Close file."*) uses uniform sentence length pacing and low vocabulary variation. This will score high on the AI heuristics scale, relying heavily on administrative appeals to clear.
+
+---
+
+## Spec Reflection
+
+* **How the Spec Guided Implementation:** Defining the JSON payload schema for endpoints in `planning.md` early on prevented integration mismatches. When implementing `POST /appeal` and updating the database, we knew exactly which identifiers (like `submission_id`) to validate, saving debugging time.
+* **How Implementation Diverged from the Spec:** We originally declared database paths as defaults in python function arguments (e.g., `def insert_submission(..., db_path=DATABASE_NAME)`). We realized that python binds default parameters at definition time, meaning that when tests modified `database.DATABASE_NAME` to point to a test database, the defaults still pointed to the main database file. We corrected this in code by setting the default parameter to `None` and evaluating the fallback inside the function body.
+
+---
+
+## AI Usage
+
+We used AI tools in two specific instances during implementation:
+1. **Heuristic Calculations (`detector.py`):** We asked the AI tool to draft basic functions for calculating Type-Token Ratio and Sentence Length Variance. The AI produced standard formulas but did not handle division-by-zero checks for short, empty, or single-sentence inputs. We revised the code to return `0.0` for variance when fewer than 2 sentences are provided.
+2. **Flask Rate Limiter Config:** We directed the AI tool to apply `Flask-Limiter` configurations to the API endpoints. The AI generated a standard configuration but failed to pass the `storage_uri="memory://"` parameter, causing warnings on startup due to missing backing services. We manually updated the limiter configuration to include in-memory storage configurations.
 
 ---
 
