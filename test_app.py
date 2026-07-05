@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import database
 import detector
-from app import app
+from app import app, limiter
 
 class TestProvenanceGuard(unittest.TestCase):
 
@@ -14,6 +14,9 @@ class TestProvenanceGuard(unittest.TestCase):
         self.db_path = "test_provenance.db"
         database.DATABASE_NAME = self.db_path
         database.init_db(self.db_path)
+        
+        # Disable rate limiting for unit tests
+        limiter.enabled = False
         
         # Configure the Flask app test client
         self.client = app.test_client()
@@ -249,6 +252,55 @@ class TestProvenanceGuard(unittest.TestCase):
         self.assertAlmostEqual(data["appeal_rate"], 0.3333, places=3)
         self.assertEqual(data["verdict_distribution"]["human"], round(2/3, 4))
         self.assertEqual(data["verdict_distribution"]["ai"], round(1/3, 4))
+
+    @patch('detector.get_llm_score')
+    def test_spec_compatibility(self, mock_llm_score):
+        # Verify compatibility with exact curl payload keys from prompt specs
+        mock_llm_score.return_value = 0.8
+        
+        submit_payload = {
+            "creator_id": "test-user-1",
+            "text": "The sun dipped below the horizon, painting the sky in hues of amber and rose..."
+        }
+        
+        response = self.client.post('/submit', json=submit_payload)
+        self.assertEqual(response.status_code, 201)
+        data = json.loads(response.data)
+        
+        # Verify exact response keys from Milestone 3 spec
+        self.assertIn("content_id", data)
+        self.assertIn("attribution", data)
+        self.assertIn("confidence", data)
+        self.assertIn("label", data)
+        self.assertEqual(data["attribution"], "uncertain")
+        
+        content_id = data["content_id"]
+        
+        # Verify exact appeal keys from Milestone 5 spec
+        appeal_payload = {
+            "content_id": content_id,
+            "creator_reasoning": "I wrote this myself from personal experience."
+        }
+        
+        response_appeal = self.client.post('/appeal', json=appeal_payload)
+        self.assertEqual(response_appeal.status_code, 200)
+        data_appeal = json.loads(response_appeal.data)
+        self.assertEqual(data_appeal["status"], "under_review")
+        self.assertEqual(data_appeal["content_id"], content_id)
+        
+        # Verify logs endpoint returns 'entries' array as specified in Milestone 3
+        response_logs = self.client.get('/log')
+        self.assertEqual(response_logs.status_code, 200)
+        data_logs = json.loads(response_logs.data)
+        self.assertIn("entries", data_logs)
+        self.assertEqual(len(data_logs["entries"]), 1)
+        
+        entry = data_logs["entries"][0]
+        self.assertEqual(entry["content_id"], content_id)
+        self.assertEqual(entry["creator_id"], "test-user-1")
+        self.assertEqual(entry["attribution"], "uncertain")
+        self.assertEqual(entry["status"], "under_review")
+        self.assertEqual(entry["appeal_reason"], "I wrote this myself from personal experience.")
 
 if __name__ == '__main__':
     unittest.main()

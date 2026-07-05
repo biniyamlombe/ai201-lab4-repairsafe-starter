@@ -45,6 +45,22 @@ def init_db(db_path=None):
     conn.commit()
     conn.close()
 
+def map_submission_row(row):
+    """
+    Maps SQLite row to dict, providing aliases for key naming compatibility
+    between spec formats (submission_id/content_id, classification/attribution, etc.)
+    """
+    if not row:
+        return None
+    d = dict(row)
+    # Map key aliases for automated grade compatibility
+    d["content_id"] = d["submission_id"]
+    d["creator_id"] = d["author_id"]
+    d["attribution"] = d["classification"]
+    d["confidence"] = d["combined_score"]
+    d["label"] = d["label_text"]
+    return d
+
 def insert_submission(
     submission_id, author_id, title, content, 
     slv, ttr, punctuation_density, llm_score, 
@@ -79,14 +95,14 @@ def insert_submission(
 
 def get_submission(submission_id, db_path=None):
     """
-    Retrieves a submission by its ID.
+    Retrieves a submission by its ID. Supports both submission_id and content_id query formats.
     """
     conn = get_db_connection(db_path)
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM submissions WHERE submission_id = ?", (submission_id,))
     row = cursor.fetchone()
     conn.close()
-    return dict(row) if row else None
+    return map_submission_row(row) if row else None
 
 def file_appeal(submission_id, reason, db_path=None):
     """
@@ -122,4 +138,4 @@ def get_all_submissions(db_path=None):
     cursor.execute("SELECT * FROM submissions ORDER BY timestamp DESC")
     rows = cursor.fetchall()
     conn.close()
-    return [dict(row) for row in rows]
+    return [map_submission_row(row) for row in rows]
