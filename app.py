@@ -1,7 +1,7 @@
 import os
 import uuid
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from flask import Flask, request, jsonify
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -105,7 +105,7 @@ def submit_content():
     
     # Append structured audit record to JSONL log file
     audit_entry = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "event": "submission",
         "submission_id": submission_id,
         "author_id": author_id,
@@ -171,7 +171,7 @@ def submit_appeal():
          
     # Log the appeal event in JSONL
     appeal_entry = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "event": "appeal",
         "submission_id": submission_id,
         "author_id": submission["author_id"],

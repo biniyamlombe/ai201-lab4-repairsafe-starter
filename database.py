@@ -1,6 +1,6 @@
 import sqlite3
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 DATABASE_NAME = "provenance_guard.db"
 
@@ -54,7 +54,7 @@ def insert_submission(
     """
     conn = get_db_connection(db_path)
     cursor = conn.cursor()
-    timestamp = datetime.utcnow().isoformat()
+    timestamp = datetime.now(timezone.utc).isoformat()
     
     cursor.execute("""
         INSERT INTO submissions (
