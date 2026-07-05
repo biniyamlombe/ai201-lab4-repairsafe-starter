@@ -30,13 +30,8 @@ graph TD
 ```
 
 ### Architecture Narrative
-1. **Request Intake:** A creator submits text via `POST /api/v1/submit`.
-2. **Rate Limiting:** The request passes through `Flask-Limiter` configurations, ensuring request frequency is within acceptable bounds.
-3. **Pipeline Orchestration:** `detector.py` invokes two distinct signals:
-   - **Signal 1 (Stylometric Heuristics):** Calculates Sentence Length Variance (SLV) and Type-Token Ratio (TTR) directly in Python.
-   - **Signal 2 (Groq LLM):** Querying Llama-3.3-70b-versatile to examine the prose for clichéd structures, high-probability token groupings, and uniformity.
-4. **Aggregation & Verdict:** The engine combines the signals, applies threshold categorization, generates the appropriate user-facing label text, writes the audit logs (to SQLite database and `logs/audit.jsonl`), and returns the response.
-5. **Appeal Lifecycle:** If the client submits `POST /api/v1/appeal`, the database is queried, the item's status is changed to `"under_review"`, and the audit trail is updated. Subsequent reads will return a neutral "Under Review" status to users.
+* **Submission Flow:** The client submits content to `POST /submit`. If the request passes the rate limiter, the pipeline calculates stylometric heuristics and queries Llama-3.3 via Groq. The engine aggregates the scores, maps them to a transparency label, stores the transaction in SQLite and the JSONL log, and returns the verdict.
+* **Appeal Flow:** The client contests a decision via `POST /appeal`. The server updates the database status of that submission to `"under_review"` and appends the event to the JSONL log, ensuring subsequent lookups display a neutral status to protect the author.
 
 ---
 
@@ -46,95 +41,95 @@ graph TD
 * **What it measures:** 
   1. **Sentence Length Variance (SLV):** The statistical variance ($\sigma^2$) of the word count per sentence.
   2. **Type-Token Ratio (TTR):** The ratio of unique words to total words.
+  3. **Punctuation Density:** The count of punctuation marks relative to total text characters.
+* **Output Format:** Numeric values for SLV, TTR, and Punctuation Density, combined into a normalized heuristic score between `0.0` (Highly Human) and `1.0` (Highly AI).
 * **Why it differs between Human and AI:**
-  * **Sentence Length:** Human writers naturally use a dynamic mix of short, punchy sentences and long, descriptive, compound sentences. AI models prefer uniform sentence lengths (usually 12-18 words) to maintain a smooth, readable flow. Therefore, human writing has high SLV, while AI text has low SLV.
-  * **Vocabulary Diversity:** Human writing features eccentric vocabulary, slang, and contextual repetition patterns, whereas AI models tend to use common, safe, highly probable words, leading to a lower TTR.
+  * **SLV:** Humans write with high variance (some sentences are 3 words, some are 40). AI writing maintains a uniform pacing, meaning low variance.
+  * **TTR:** Humans choose diverse, context-specific words, yielding a higher TTR. AI text leans on safe, highly probable tokens, resulting in lower vocabulary diversity.
 * **Blind Spots:**
-  * **Very Short Text:** For text shorter than 50 words, statistical calculations like SLV and TTR lose significance (high error variance).
-  * **Prompt-Engineered AI:** A sophisticated prompt instructing an AI to write with "highly varied sentence structures and quirky vocabulary" can inflate SLV and TTR.
+  * **Short Text (< 50 words):** Variance and TTR calculations become mathematically volatile.
+  * **Prompt-Engineered AI:** A prompt instructing the AI to "write with irregular pacing and eccentric vocab" can trick these statistics.
 
 ### Signal 2: Forensic Linguistic Analysis (LLM Analysis)
-* **What it measures:** Use of stylistic clichés (*delve, testament, tapestry, explore, furthermore*), paragraph structure predictability, and semantic depth.
+* **What it measures:** Tonal coherence, clichéd transitions (*delve, tapestry, testament*), and structured patterns typical of modern AI models.
+* **Output Format:** A JSON response containing `"ai_likelihood"` (a float between `0.0` and `1.0`) and `"reasoning"` (text explaining the linguistic details).
 * **Why it differs between Human and AI:**
-  * AI text is generated token-by-token based on average patterns across the web, making its semantic transitions and analogies extremely predictable and "standardized." Humans write with personal voice, logical leaps, and unconventional structuring.
+  * AI text is highly predictable due to probability distribution limits, while human writing features logical jumps, emotional nuances, and stylistic eccentricities.
 * **Blind Spots:**
-  * **Highly Edited Human Prose:** A highly edited academic article or legal text can look exactly like an AI's structured, formal response.
-  * **Translations:** Humans translating original work word-for-word may construct semantic flows that appear rigid or unnatural to an LLM evaluator.
+  * **Academic / Legal Writing:** Humans writing highly structured, formal papers can trigger the AI semantic detector.
+  * **Non-Native English Texts:** Creators using simple, repetitive structures or machine translators can look like AI text.
 
 ---
 
-## False Positive Strategy (Asymmetric Design)
+## Uncertainty Representation & Score Calibration
 
-* **Asymmetric Confidence Weighting:** The classification rules favor human attribution because a false positive (flagging a human's original work as AI) is far more damaging than a false negative.
-* **Score Calibration:** 
-  * If the combined confidence score is high ($> 0.80$), it receives the **High-Confidence AI** label.
-  * If the combined score is low ($< 0.40$), it receives the **High-Confidence Human** label.
-  * If the combined score is in the middle ($0.40 \le \text{score} \le 0.80$), the system assigns the **Uncertain** label, protecting the user from an false AI accusation.
-* **Neutralizing Status on Appeal:** As soon as an appeal is filed, the state changes to `"under_review"` which hides any AI label, displaying a neutral "Under Review" notice to avoid reputation damage during verification.
+* **What a score of 0.6 means:** 
+  A combined score of `0.6` represents **Uncertainty**. It indicates that the text has conflicting signals (e.g., the LLM detected slight AI-like vocabulary, but the sentence structures were highly irregular and human-like). Rather than forcing a binary decision, the system maps this to the `Uncertain` classification, leaving the public label neutral.
+* **Ensemble Weighting Formula:**
+  * **Short Text (< 50 words):** Heuristics are ignored due to volatility.
+    $$\text{Combined Score} = \text{LLM Score}$$
+  * **Long Text ($\ge 50$ words):**
+    $$\text{Combined Score} = 0.3 \times \text{Heuristic Score} + 0.7 \times \text{LLM Score}$$
+* **Calibration Thresholds:**
+  * **Likely Human:** $\text{score} < 0.40$
+  * **Uncertain:** $0.40 \le \text{score} \le 0.80$
+  * **Likely AI:** $\text{score} > 0.80$
 
 ---
 
-## API Surface
+## Transparency Label Design (Verbatim Texts)
 
-### 1. Submit Content
-* **Endpoint:** `POST /api/v1/submit`
-* **Request Format:**
-  ```json
-  {
-    "author_id": "creator_123",
-    "title": "My Short Story",
-    "content": "The old house stood silently on the hill..."
-  }
-  ```
-* **Success Response (201 Created):**
-  ```json
-  {
-    "submission_id": "sub_abc123",
-    "classification": "human" | "uncertain" | "ai",
-    "confidence_score": 0.12,
-    "label_text": "This work is classified as human-authored.",
-    "status": "active"
-  }
-  ```
+* **High-Confidence Human:**
+  > `"This work is classified as human-authored. Our analysis suggests a high probability of original human creation."`
+* **Uncertain:**
+  > `"This work has mixed stylistic markers. Our analysis is unable to determine the origin with high confidence, so the author's original attribution is displayed."`
+* **High-Confidence AI:**
+  > `"This work is flagged as AI-generated. Our analysis detected patterns highly consistent with artificial intelligence writing tools."`
 
-### 2. Submit Appeal
-* **Endpoint:** `POST /api/v1/appeal`
-* **Request Format:**
-  ```json
-  {
-    "submission_id": "sub_abc123",
-    "reason": "This is entirely my own original writing."
-  }
-  ```
-* **Success Response (200 OK):**
-  ```json
-  {
-    "submission_id": "sub_abc123",
-    "status": "under_review",
-    "message": "Appeal successfully logged. Content is now under review."
-  }
-  ```
+---
 
-### 3. Retrieve Logs
-* **Endpoint:** `GET /api/v1/logs`
-* **Success Response (200 OK):**
-  ```json
-  {
-    "logs": [
-      {
-        "id": 1,
-        "submission_id": "sub_abc123",
-        "timestamp": "2026-07-05T14:15:00",
-        "author_id": "creator_123",
-        "title": "My Short Story",
-        "content_preview": "The old house stood...",
-        "heuristic_score": 0.15,
-        "llm_score": 0.08,
-        "combined_score": 0.11,
-        "classification": "human",
-        "status": "active",
-        "appeal_reason": null
-      }
-    ]
-  }
-  ```
+## Appeals Workflow
+
+* **Who can appeal:** Only the creator associated with the `author_id` of the original submission.
+* **Information provided:** The original `submission_id` and a written text reasoning.
+* **System Actions upon Receipt:**
+  1. Validates the existence of the `submission_id`.
+  2. Updates the SQL database record's `status` to `"under_review"` and saves the `appeal_reason`.
+  3. Appends an `"appeal"` event record containing the reason to `logs/audit.jsonl`.
+* **Human Reviewer Interface Queue:**
+  A moderator querying the admin endpoint receives a structured JSON queue containing all submissions where `status = 'under_review'`. They can inspect:
+  * The raw content and title.
+  * The individual Signal 1 (SLV, TTR) and Signal 2 (LLM) scores.
+  * The creator's appeal reason.
+
+---
+
+## Anticipated Edge Cases
+
+1. **Repetitive Poetry (e.g., Villanelles or Ballads):**
+   * *Description:* Human-written poems featuring refrains and highly structured lines (e.g., Edgar Allan Poe's "The Raven").
+   * *Failure Mode:* The repeating phrases severely reduce the Type-Token Ratio (TTR) and sentence length variance, causing heuristics to flag the poem as AI.
+   * *Mitigation:* The ensemble weights the LLM semantic signal higher, and the appeal status quickly neutralizes false classifications.
+2. **Structured Software Code Explanations:**
+   * *Description:* Technical documentation detailing code snippets in step-by-step guides.
+   * *Failure Mode:* Explanations often use repetitive, dry, and structured verbs (e.g., "Implement the following function. Next, compile the code.").
+   * *Mitigation:* The system uses the `Uncertain` buffer to prevent immediate flagging, allowing users to submit appeals.
+
+---
+
+## AI Tool Plan
+
+### M3 (Submission Endpoint + Heuristics Signal)
+* **Spec Sections Provided:** `Architecture` (diagram + narrative) + `Detection Signals` (Signal 1 Heuristics specifications).
+* **AI Generation Request:** Generate the Flask application skeleton, configure routing, implement python-based functions for Sentence Length Variance, Type-Token Ratio, and Punctuation Density, and write local tests.
+* **Verification Method:** Run unit tests against known inputs (e.g. texts of uniform length to assert SLV = 0) before integrating the second signal.
+
+### M4 (Second Signal + Confidence Scoring)
+* **Spec Sections Provided:** `Detection Signals` (Signal 2 LLM specifications) + `Uncertainty Representation & Score Calibration` + `Architecture` (system diagram).
+* **AI Generation Request:** Integrate the Groq Llama-3.3-70b-versatile client with JSON mode. Implement the short-text override and the weighted ensemble scoring math.
+* **Verification Method:** Compare scores of a known human-written blog post against an AI-generated essay, validating that the final combined scores fall into the expected ranges.
+
+### M5 (Production Layer)
+* **Spec Sections Provided:** `Transparency Label Design` + `Appeals Workflow` + `Architecture` (system diagram).
+* **AI Generation Request:** Implement Flask-Limiter configurations, SQLite database status update query actions for `/appeal`, JSONL file appending, and custom Flask 429 error handlers.
+* **Verification Method:** Loop sequential curl requests to trigger `429 Too Many Requests`. Run mock appeals to verify database status transitions to `"under_review"`.
